@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 const P: u64 = 0xD87FA3E291B4C7F3;
-const G: u64 = 2; 
+const G: u64 = 2;
 
 const LCG_A: u32 = 1103515245;
 const LCG_C: u32 = 12345;

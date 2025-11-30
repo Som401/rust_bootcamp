@@ -466,7 +466,7 @@ fn main() {
             grid.height - 1,
             grid.get(grid.width - 1, grid.height - 1)
         );
-        
+
         if let Some(ref min) = min_result {
             print_path_analysis(&grid, min, "MINIMUM");
         }
@@ -476,4 +476,3 @@ fn main() {
         }
     }
 }
-

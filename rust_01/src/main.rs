@@ -99,7 +99,7 @@ fn main() {
     }
 
     let from_stdin = text_parts.is_empty();
-    
+
     let input = if from_stdin {
         match collect_text_from_stdin() {
             Ok(t) => t,
@@ -135,7 +135,10 @@ fn main() {
 
     if from_stdin {
         // Single-line output for stdin: "foo: 2  bar: 1"
-        let parts: Vec<String> = to_show.iter().map(|(w, n)| format!("{}: {}", w, n)).collect();
+        let parts: Vec<String> = to_show
+            .iter()
+            .map(|(w, n)| format!("{}: {}", w, n))
+            .collect();
         println!("{}", parts.join("  "));
     } else {
         // Multi-line output with header for positional args

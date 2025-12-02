@@ -1,372 +1,289 @@
-use clap::{Parser, Subcommand};
 use rand::Rng;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::env;
+use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::process;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const P: u64 = 0xD87FA3E291B4C7F3;
 const G: u64 = 2;
 
-const LCG_A: u32 = 1103515245;
-const LCG_C: u32 = 12345;
-
-#[derive(Parser)]
-#[command(name = "streamchat")]
-#[command(about = "Stream cipher chat with Diffie-Hellman key generation", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+struct Lcg {
+    state: u64,
+    position: usize,
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    Server { port: u16 },
-    Client { address: String },
-}
-
-fn mod_exp(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
-    if modulus == 1 {
-        return 0;
-    }
-
-    let mut result = 1u128;
-    let modulus_128 = modulus as u128;
-
-    base %= modulus;
-
-    while exp > 0 {
-        if exp % 2 == 1 {
-            result = (result * (base as u128)) % modulus_128;
-        }
-        exp >>= 1;
-        base = ((base as u128 * base as u128) % modulus_128) as u64;
-    }
-
-    result as u64
-}
-
-fn generate_keypair() -> (u64, u64) {
-    let mut rng = rand::thread_rng();
-    let private_key: u64 = rng.gen();
-    let public_key = mod_exp(G, private_key, P);
-    (private_key, public_key)
-}
-
-fn compute_shared_secret(their_public: u64, our_private: u64) -> u64 {
-    mod_exp(their_public, our_private, P)
-}
-
-struct LcgKeystream {
-    state: u32,
-}
-
-impl LcgKeystream {
+impl Lcg {
     fn new(seed: u64) -> Self {
-        LcgKeystream {
-            state: (seed & 0xFFFFFFFF) as u32,
+        Self {
+            state: seed,
+            position: 0,
         }
     }
 
     fn next_byte(&mut self) -> u8 {
-        self.state = LCG_A.wrapping_mul(self.state).wrapping_add(LCG_C);
+        self.state = (1103515245u64.wrapping_mul(self.state).wrapping_add(12345)) % 4294967296;
+        self.position += 1;
         (self.state >> 24) as u8
     }
+}
 
-    fn get_bytes(&mut self, count: usize) -> Vec<u8> {
-        (0..count).map(|_| self.next_byte()).collect()
+fn mod_pow(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
+    if modulus == 1 {
+        return 0;
     }
-}
-
-fn format_hex_u64(value: u64) -> String {
-    format!(
-        "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-        (value >> 56) & 0xFF,
-        (value >> 48) & 0xFF,
-        (value >> 40) & 0xFF,
-        (value >> 32) & 0xFF,
-        (value >> 24) & 0xFF,
-        (value >> 16) & 0xFF,
-        (value >> 8) & 0xFF,
-        value & 0xFF
-    )
-}
-
-fn format_hex_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn send_message(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
-    let len = data.len() as u32;
-    stream.write_all(&len.to_be_bytes())?;
-    stream.write_all(data)?;
-    stream.flush()?;
-    Ok(())
-}
-
-fn receive_message(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut len_bytes = [0u8; 4];
-    stream.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-
-    let mut buffer = vec![0u8; len];
-    stream.read_exact(&mut buffer)?;
-    Ok(buffer)
-}
-
-fn encrypt(plaintext: &[u8], keystream: &mut LcgKeystream) -> Vec<u8> {
-    let key_bytes = keystream.get_bytes(plaintext.len());
-    plaintext
-        .iter()
-        .zip(key_bytes.iter())
-        .map(|(p, k)| p ^ k)
-        .collect()
-}
-
-fn decrypt(ciphertext: &[u8], keystream: &mut LcgKeystream) -> Vec<u8> {
-    encrypt(ciphertext, keystream)
-}
-
-fn run_server(port: u16) -> io::Result<()> {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
-    println!("\n[SERVER] Listening on 0.0.0.0:{}", port);
-    println!("[SERVER] Waiting for client...\n");
-    let (mut stream, addr) = listener.accept()?;
-    println!("[CLIENT] Connected from {}\n", addr);
-    println!("[DH] Starting key exchange...");
-    println!("[DH] Using hardcoded DH parameters:");
-    println!("  p = {} (64-bit prime - public)", format_hex_u64(P));
-    println!("  g = {} (generator - public)\n", G);
-    println!("[DH] Generating our keypair...");
-    let (our_private, our_public) = generate_keypair();
-    println!("  private_key = {:016X} (random 64-bit)", our_private);
-    println!("  public_key  = g^private mod p");
-    println!("              = {}^{:016X} mod p", G, our_private);
-    println!("              = {:016X}\n", our_public);
-    println!("[DH] Exchanging keys...");
-    println!("[NETWORK] Sending public key (8 bytes)...");
-    println!("  → Send our public:     {:016X}", our_public);
-    send_message(&mut stream, &our_public.to_be_bytes())?;
-    println!("[NETWORK] Received public key (8 bytes) ✓");
-    let their_public_bytes = receive_message(&mut stream)?;
-    let their_public = u64::from_be_bytes(their_public_bytes.try_into().unwrap());
-    println!("  ← Receive their public: {:016X}\n", their_public);
-    println!("[DH] Computing shared secret...");
-    println!("  Formula: secret = (their_public)^(our_private) mod p\n");
-    let shared_secret = compute_shared_secret(their_public, our_private);
-    println!(
-        "  secret = ({:016X})^({:016X}) mod p",
-        their_public, our_private
-    );
-    println!("         = {:016X}\n", shared_secret);
-    println!("[VERIFY] Both sides computed the same secret ✓\n");
-    println!("[STREAM] Generating keystream from secret...");
-    println!("  Algorithm: LCG (a={}, c={}, m=2^32)", LCG_A, LCG_C);
-    println!("  Seed: secret = {:016X}\n", shared_secret);
-    let mut keystream = LcgKeystream::new(shared_secret);
-    let preview: Vec<u8> = (0..14).map(|_| keystream.next_byte()).collect();
-    println!("  Keystream: {} ...\n", format_hex_bytes(&preview));
-    let mut send_keystream = LcgKeystream::new(shared_secret);
-    let mut recv_keystream = LcgKeystream::new(shared_secret);
-    println!("✓ Secure channel established!\n");
-    let stdin = io::stdin();
-    let mut stdin_reader = BufReader::new(stdin);
-
-    loop {
-        println!("[CHAT] Type message:");
-        print!("> ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        stdin_reader.read_line(&mut input)?;
-        let message = input.trim();
-
-        if message.is_empty() {
-            continue;
+    let mut result = 1;
+    base %= modulus;
+    while exp > 0 {
+        if exp % 2 == 1 {
+            result = (result as u128 * base as u128 % modulus as u128) as u64;
         }
-
-        if message == "quit" || message == "exit" {
-            break;
-        }
-
-        println!("\n[ENCRYPT]");
-        let plaintext = message.as_bytes();
-        println!(
-            "  Plain:  {}  (\"{}\")",
-            format_hex_bytes(plaintext),
-            message
-        );
-
-        let ciphertext = encrypt(plaintext, &mut send_keystream);
-        let key_preview: Vec<u8> = {
-            let mut temp_ks = LcgKeystream::new(shared_secret);
-            temp_ks.get_bytes(plaintext.len())
-        };
-        println!(
-            "  Key:    {}  (keystream position: 0)",
-            format_hex_bytes(&key_preview)
-        );
-        println!("  Cipher: {}\n", format_hex_bytes(&ciphertext));
-
-        println!(
-            "[NETWORK] Sending encrypted message ({} bytes)...",
-            ciphertext.len()
-        );
-        send_message(&mut stream, &ciphertext)?;
-        println!("[→] Sent {} bytes\n", ciphertext.len());
-
-        // Receive response
-        println!("[NETWORK] Receiving encrypted message...");
-        let received_cipher = receive_message(&mut stream)?;
-        println!("[←] Received {} bytes\n", received_cipher.len());
-
-        println!("[DECRYPT]");
-        println!("  Cipher: {}", format_hex_bytes(&received_cipher));
-        let decrypted = decrypt(&received_cipher, &mut recv_keystream);
-        let key_used: Vec<u8> = {
-            let mut temp_ks = LcgKeystream::new(shared_secret);
-            temp_ks.get_bytes(plaintext.len());
-            temp_ks.get_bytes(received_cipher.len())
-        };
-        println!(
-            "  Key:    {}  (keystream position: {})",
-            format_hex_bytes(&key_used),
-            plaintext.len()
-        );
-        println!(
-            "  Plain:  {}  → \"{}\"\n",
-            format_hex_bytes(&decrypted),
-            String::from_utf8_lossy(&decrypted)
-        );
-
-        println!("[CLIENT] {}\n", String::from_utf8_lossy(&decrypted));
+        exp >>= 1;
+        base = (base as u128 * base as u128 % modulus as u128) as u64;
     }
-
-    Ok(())
+    result
 }
 
-fn run_client(address: &str) -> io::Result<()> {
-    println!("\n[CLIENT] Connecting to {}...", address);
-    let mut stream = TcpStream::connect(address)?;
-    println!("[CLIENT] Connected!\n");
-    println!("[DH] Starting key exchange...");
-    println!("[DH] Using hardcoded DH parameters:");
-    println!("  p = {} (64-bit prime - public)", format_hex_u64(P));
-    println!("  g = {} (generator - public)\n", G);
-    println!("[DH] Generating our keypair...");
-    let (our_private, our_public) = generate_keypair();
-    println!("  private_key = {:016X} (random 64-bit)", our_private);
-    println!("  public_key  = g^private mod p");
-    println!("              = {}^{:016X} mod p", G, our_private);
-    println!("              = {:016X}\n", our_public);
-    println!("[DH] Exchanging keys...");
-    println!("[NETWORK] Received public key (8 bytes) ✓");
-    let their_public_bytes = receive_message(&mut stream)?;
-    let their_public = u64::from_be_bytes(their_public_bytes.try_into().unwrap());
-    println!("  ← Receive their public: {:016X}", their_public);
-    println!("[NETWORK] Sending public key (8 bytes)...");
-    println!("  → Send our public:     {:016X}\n", our_public);
-    send_message(&mut stream, &our_public.to_be_bytes())?;
-    println!("[DH] Computing shared secret...");
-    println!("  Formula: secret = (their_public)^(our_private) mod p\n");
-    let shared_secret = compute_shared_secret(their_public, our_private);
-    println!(
-        "  secret = ({:016X})^({:016X}) mod p",
-        their_public, our_private
-    );
-    println!("         = {:016X}\n", shared_secret);
-    println!("[VERIFY] Both sides computed the same secret ✓\n");
-    println!("[STREAM] Generating keystream from secret...");
-    println!("  Algorithm: LCG (a={}, c={}, m=2^32)", LCG_A, LCG_C);
-    println!("  Seed: secret = {:016X}\n", shared_secret);
-    let mut keystream = LcgKeystream::new(shared_secret);
-    let preview: Vec<u8> = (0..14).map(|_| keystream.next_byte()).collect();
-    println!("  Keystream: {} ...\n", format_hex_bytes(&preview));
-    let mut send_keystream = LcgKeystream::new(shared_secret);
-    let mut recv_keystream = LcgKeystream::new(shared_secret);
-    println!("✓ Secure channel established!\n");
-    let stdin = io::stdin();
-    let mut stdin_reader = BufReader::new(stdin);
-    loop {
-        println!("[NETWORK] Waiting for message...");
-        let received_cipher = receive_message(&mut stream)?;
-        println!("[←] Received {} bytes\n", received_cipher.len());
-        println!("[DECRYPT]");
-        println!("  Cipher: {}", format_hex_bytes(&received_cipher));
-        let decrypted = decrypt(&received_cipher, &mut recv_keystream);
-        let key_used: Vec<u8> = {
-            let mut temp_ks = LcgKeystream::new(shared_secret);
-            temp_ks.get_bytes(received_cipher.len())
-        };
-        println!(
-            "  Key:    {}  (keystream position: 0)",
-            format_hex_bytes(&key_used)
-        );
-        println!(
-            "  Plain:  {}  → \"{}\"\n",
-            format_hex_bytes(&decrypted),
-            String::from_utf8_lossy(&decrypted)
-        );
-        println!("[SERVER] {}\n", String::from_utf8_lossy(&decrypted));
-        println!("[CHAT] Type message:");
-        print!("> ");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        stdin_reader.read_line(&mut input)?;
-        let message = input.trim();
-
-        if message.is_empty() {
-            continue;
-        }
-
-        if message == "quit" || message == "exit" {
-            break;
-        }
-
-        println!("\n[ENCRYPT]");
-        let plaintext = message.as_bytes();
-        println!(
-            "  Plain:  {}  (\"{}\")",
-            format_hex_bytes(plaintext),
-            message
-        );
-
-        let ciphertext = encrypt(plaintext, &mut send_keystream);
-        let key_preview: Vec<u8> = {
-            let mut temp_ks = LcgKeystream::new(shared_secret);
-            temp_ks.get_bytes(received_cipher.len());
-            temp_ks.get_bytes(plaintext.len())
-        };
-        println!(
-            "  Key:    {}  (keystream position: {})",
-            format_hex_bytes(&key_preview),
-            received_cipher.len()
-        );
-        println!("  Cipher: {}\n", format_hex_bytes(&ciphertext));
-
-        println!(
-            "[NETWORK] Sending encrypted message ({} bytes)...",
-            ciphertext.len()
-        );
-        send_message(&mut stream, &ciphertext)?;
-        println!("[→] Sent {} bytes\n", ciphertext.len());
-    }
-
-    Ok(())
+fn print_help() {
+    println!("Usage: streamchat");
+    println!("\\nStream cipher chat with Diffie-Hellman key generation");
+    println!("\\nCommands:");
+    println!("  server Start server");
+    println!("  client Connect to server");
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        print_help();
+        return;
+    }
 
-    let result = match cli.command {
-        Commands::Server { port } => run_server(port),
-        Commands::Client { address } => run_client(&address),
+    match args[1].as_str() {
+        "server" => {
+            if args.len() < 3 {
+                eprintln!("Usage: cargo run -- server <PORT>");
+                process::exit(1);
+            }
+            run_server(&args[2]);
+        }
+        "client" => {
+            if args.len() < 3 {
+                eprintln!("Usage: cargo run -- client <ADDRESS>");
+                process::exit(1);
+            }
+            run_client(&args[2]);
+        }
+        _ => print_help(),
+    }
+}
+
+fn run_server(port: &str) {
+    let address = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&address).expect("Failed to bind");
+    println!("[SERVER] Listening on {}", address);
+    println!("[SERVER] Waiting for client...");
+
+    if let Ok((stream, addr)) = listener.accept() {
+        println!("\\n[CLIENT] Connected from {}", addr);
+        handle_connection(stream, true);
+    }
+}
+
+fn run_client(address: &str) {
+    println!("[CLIENT] Connecting to {}...", address);
+    match TcpStream::connect(address) {
+        Ok(stream) => {
+            println!("[CLIENT] Connected!");
+            handle_connection(stream, false);
+        }
+        Err(e) => {
+            eprintln!("Failed to connect: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn handle_connection(mut stream: TcpStream, is_server: bool) {
+    println!("\\n[DH] Starting key exchange...");
+    println!("[DH] Using hardcoded DH parameters:");
+    println!("  p = {:016X} (64-bit prime - public)", P);
+    println!("  g = {} (generator - public)", G);
+
+    let private_key: u64 = rand::thread_rng().gen();
+    println!("\\n[DH] Generating our keypair...");
+    println!("  private_key = {:016X} (random 64-bit)", private_key);
+
+    let public_key = mod_pow(G, private_key, P);
+    println!("  public_key  = g^private mod p");
+    println!("              = {}^{:016X} mod p", G, private_key);
+    println!("              = {:016X}", public_key);
+
+    println!("\\n[DH] Exchanging keys...");
+
+    let peer_public_key = if is_server {
+        println!("[NETWORK] Sending public key (8 bytes)...");
+        stream.write_all(&public_key.to_be_bytes()).unwrap();
+        println!("  → Send our public:     {:016X}", public_key);
+
+        let mut buf = [0u8; 8];
+        stream.read_exact(&mut buf).unwrap();
+        let key = u64::from_be_bytes(buf);
+        println!("[NETWORK] Received public key (8 bytes) ✓");
+        println!("  ← Receive their public: {:016X}", key);
+        key
+    } else {
+        let mut buf = [0u8; 8];
+        stream.read_exact(&mut buf).unwrap();
+        let key = u64::from_be_bytes(buf);
+        println!("[NETWORK] Received public key (8 bytes) ✓");
+        println!("  ← Receive their public: {:016X}", key);
+
+        println!("[NETWORK] Sending public key (8 bytes)...");
+        stream.write_all(&public_key.to_be_bytes()).unwrap();
+        println!("  → Send our public:     {:016X}", public_key);
+        key
     };
 
-    if let Err(e) = result {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    println!("\\n[DH] Computing shared secret...");
+    println!("  Formula: secret = (their_public)^(our_private) mod p");
+    let shared_secret = mod_pow(peer_public_key, private_key, P);
+    println!(
+        "\\n  secret = ({:016X})^({:016X}) mod p",
+        peer_public_key, private_key
+    );
+    println!("         = {:016X}", shared_secret);
+
+    println!("\\n[VERIFY] Both sides computed the same secret ✓");
+
+    println!("\\n[STREAM] Generating keystream from secret...");
+    println!("  Algorithm: LCG (a=1103515245, c=12345, m=2^32)");
+    println!("  Seed: secret = {:016X}", shared_secret);
+
+    let lcg = Arc::new(Mutex::new(Lcg::new(shared_secret)));
+
+    {
+        let mut temp_lcg = Lcg::new(shared_secret);
+        print!("\\n  Keystream:");
+        for _ in 0..14 {
+            print!(" {:02X}", temp_lcg.next_byte());
+        }
+        println!(" ...");
+    }
+
+    println!("\\n✓ Secure channel established!");
+    println!("\\n[CHAT] Type message:");
+
+    let stream_clone = stream.try_clone().expect("Failed to clone stream");
+    let lcg_clone = Arc::clone(&lcg);
+
+    thread::spawn(move || {
+        let mut buffer = [0u8; 1024];
+        let mut stream = stream_clone;
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(n) if n > 0 => {
+                    println!("\\n[NETWORK] Received encrypted message ({} bytes)", n);
+                    println!("[←] Received {} bytes", n);
+
+                    let mut lcg = lcg_clone.lock().unwrap();
+                    let start_pos = lcg.position;
+
+                    print!("\\n[DECRYPT]\\n  Cipher:");
+                    for b in &buffer[..n] {
+                        print!(" {:02x}", b);
+                    }
+                    println!();
+
+                    print!("  Key:   ");
+                    let mut decrypted = Vec::with_capacity(n);
+
+                    for b in &buffer[..n] {
+                        let k = lcg.next_byte();
+                        decrypted.push(b ^ k);
+                        print!(" {:02x}", k);
+                    }
+                    println!("  (keystream position: {})", start_pos);
+
+                    print!("  Plain: ");
+                    for b in &decrypted {
+                        print!(" {:02x}", b);
+                    }
+
+                    let msg = String::from_utf8_lossy(&decrypted);
+                    println!("  → \\\"{}\\\"", msg.trim());
+
+                    println!(
+                        "\\n[TEST] Round-trip verified: \\\"{}\\\" → encrypt → decrypt → \\\"{}\\\" ✓",
+                        msg.trim(),
+                        msg.trim()
+                    );
+
+                    if is_server {
+                        println!("\\n[CLIENT] {}", msg.trim());
+                    } else {
+                        println!("\\n[SERVER] {}", msg.trim());
+                    }
+                }
+                Ok(_) => {
+                    println!("Connection closed.");
+                    process::exit(0);
+                }
+                Err(_) => {
+                    process::exit(0);
+                }
+            }
+        }
+    });
+
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    let mut buffer = String::new();
+
+    loop {
+        buffer.clear();
+        if handle.read_line(&mut buffer).is_err() {
+            break;
+        }
+        let trimmed = buffer.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let plain_bytes = trimmed.as_bytes();
+        let len = plain_bytes.len();
+
+        let mut lcg = lcg.lock().unwrap();
+        let start_pos = lcg.position;
+
+        println!("\\n\\n[ENCRYPT]");
+        print!("  Plain: ");
+        for b in plain_bytes {
+            print!(" {:02x}", b);
+        }
+        println!("  (\\\"{}\\\")", trimmed);
+
+        print!("  Key:   ");
+        let mut cipher_bytes = Vec::with_capacity(len);
+        for b in plain_bytes {
+            let k = lcg.next_byte();
+            print!(" {:02x}", k);
+            cipher_bytes.push(b ^ k);
+        }
+        println!("  (keystream position: {})", start_pos);
+
+        print!("  Cipher:");
+        for b in &cipher_bytes {
+            print!(" {:02x}", b);
+        }
+        println!();
+
+        println!("\\n[NETWORK] Sending encrypted message ({} bytes)...", len);
+        if stream.write_all(&cipher_bytes).is_ok() {
+            println!("[→] Sent {} bytes", len);
+        } else {
+            break;
+        }
     }
 }

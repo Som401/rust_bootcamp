@@ -61,14 +61,14 @@ fn main() {
                 let v = match args.next() {
                     Some(v) => v,
                     None => {
-                        eprintln!("Missing value for --top");
+                        eprintln!("error: Missing value for --top");
                         std::process::exit(2);
                     }
                 };
                 top_n = match v.parse::<usize>() {
                     Ok(n) if n > 0 => n,
                     _ => {
-                        eprintln!("--top expects a positive integer");
+                        eprintln!("error: --top expects a positive integer");
                         std::process::exit(2);
                     }
                 };
@@ -77,32 +77,34 @@ fn main() {
                 let v = match args.next() {
                     Some(v) => v,
                     None => {
-                        eprintln!("Missing value for --min-length");
+                        eprintln!("error: Missing value for --min-length");
                         std::process::exit(2);
                     }
                 };
                 min_len = match v.parse::<usize>() {
                     Ok(n) if n > 0 => n,
                     _ => {
-                        eprintln!("--min-length expects a positive integer");
+                        eprintln!("error: --min-length expects a positive integer");
                         std::process::exit(2);
                     }
                 };
             }
             s if s.starts_with('-') => {
-                eprintln!("Unknown option: {}", s);
-                eprintln!("Try '--help' for usage");
+                eprintln!("error: Unknown option: {}", s);
+                eprintln!("error: Try '--help' for usage");
                 std::process::exit(2);
             }
             s => text_parts.push(s.to_string()),
         }
     }
 
-    let input = if text_parts.is_empty() {
+    let from_stdin = text_parts.is_empty();
+    
+    let input = if from_stdin {
         match collect_text_from_stdin() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("Failed to read stdin: {}", e);
+                eprintln!("error: Failed to read stdin: {}", e);
                 std::process::exit(1);
             }
         }
@@ -129,14 +131,21 @@ fn main() {
     let mut items: Vec<(String, usize)> = counts.into_iter().collect();
     items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    if top_n == 10 {
-        println!("Word frequency:");
-    } else {
-        println!("Top {} words:", top_n);
-    }
+    let to_show: Vec<_> = items.into_iter().take(top_n).collect();
 
-    let to_show = items.into_iter().take(top_n);
-    for (w, n) in to_show {
-        println!("{}: {}", w, format_number(n));
+    if from_stdin {
+        // Single-line output for stdin: "foo: 2  bar: 1"
+        let parts: Vec<String> = to_show.iter().map(|(w, n)| format!("{}: {}", w, n)).collect();
+        println!("{}", parts.join("  "));
+    } else {
+        // Multi-line output with header for positional args
+        if top_n == 10 {
+            println!("Word frequency:");
+        } else {
+            println!("Top {} words:", top_n);
+        }
+        for (w, n) in to_show {
+            println!("{}: {}", w, format_number(n));
+        }
     }
 }

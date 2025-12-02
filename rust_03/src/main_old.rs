@@ -1,7 +1,7 @@
-use std::env;
+use clap::{Parser, Subcommand};
+use rand::Rng;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const P: u64 = 0xD87FA3E291B4C7F3;
 const G: u64 = 2;
@@ -9,40 +9,18 @@ const G: u64 = 2;
 const LCG_A: u32 = 1103515245;
 const LCG_C: u32 = 12345;
 
-fn print_help() {
-    println!(
-        "Usage: streamchat <COMMAND>\n\
-\n\
-Stream cipher chat with Diffie-Hellman key generation\n\
-\n\
-Commands:\n\
-  server <PORT>       Start server on port\n\
-  client <ADDRESS>    Connect to server\n\
-  -h, --help          Print help"
-    );
+#[derive(Parser)]
+#[command(name = "streamchat")]
+#[command(about = "Stream cipher chat with Diffie-Hellman key generation", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-// Simple PRNG to replace rand::thread_rng()
-struct SimplePrng {
-    state: u64,
-}
-
-impl SimplePrng {
-    fn new() -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        SimplePrng { state: seed }
-    }
-
-    fn gen_u64(&mut self) -> u64 {
-        // Xorshift64
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 7;
-        self.state ^= self.state << 17;
-        self.state
-    }
+#[derive(Subcommand)]
+enum Commands {
+    Server { port: u16 },
+    Client { address: String },
 }
 
 fn mod_exp(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
@@ -67,8 +45,8 @@ fn mod_exp(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
 }
 
 fn generate_keypair() -> (u64, u64) {
-    let mut rng = SimplePrng::new();
-    let private_key: u64 = rng.gen_u64();
+    let mut rng = rand::thread_rng();
+    let private_key: u64 = rng.gen();
     let public_key = mod_exp(G, private_key, P);
     (private_key, public_key)
 }
@@ -380,50 +358,15 @@ fn run_client(address: &str) -> io::Result<()> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    if args.len() < 2 {
-        eprintln!("error: Missing command");
-        eprintln!("error: Try '--help' for usage");
-        std::process::exit(2);
-    }
+    let result = match cli.command {
+        Commands::Server { port } => run_server(port),
+        Commands::Client { address } => run_client(&address),
+    };
 
-    match args[1].as_str() {
-        "-h" | "--help" => {
-            print_help();
-            return;
-        }
-        "server" => {
-            if args.len() < 3 {
-                eprintln!("error: Missing port for server command");
-                std::process::exit(2);
-            }
-            let port: u16 = match args[2].parse() {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!("error: Invalid port number");
-                    std::process::exit(2);
-                }
-            };
-            if let Err(e) = run_server(port) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
-        }
-        "client" => {
-            if args.len() < 3 {
-                eprintln!("error: Missing address for client command");
-                std::process::exit(2);
-            }
-            if let Err(e) = run_client(&args[2]) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
-        }
-        _ => {
-            eprintln!("error: Unknown command: {}", args[1]);
-            eprintln!("error: Try '--help' for usage");
-            std::process::exit(2);
-        }
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 }

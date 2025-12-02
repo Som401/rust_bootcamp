@@ -1,26 +1,22 @@
-use clap::Parser;
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-#[derive(Parser)]
-#[command(name = "hextool")]
-#[command(about = "Read and write binary files in hexadecimal", long_about = None)]
-struct Cli {
-    #[arg(short, long, value_name = "file")]
-    file: Option<PathBuf>,
-
-    #[arg(short, long)]
-    read: bool,
-
-    #[arg(short, long, value_name = "hex")]
-    write: Option<String>,
-
-    #[arg(short, long, value_name = "off")]
-    offset: Option<String>,
-
-    #[arg(short, long, value_name = "n")]
-    size: Option<usize>,
+fn print_help() {
+    println!(
+        "Usage: hextool [OPTIONS]\n\
+\n\
+Read and write binary files in hexadecimal\n\
+\n\
+Options:\n\
+  -f, --file <file>     Target file\n\
+  -r, --read            Read mode (display hex)\n\
+  -w, --write <hex>     Write mode (hex string to write)\n\
+  -o, --offset <off>    Offset in bytes (decimal or 0x hex)\n\
+  -s, --size <n>        Number of bytes to read\n\
+  -h, --help            Print help"
+    );
 }
 
 fn parse_offset(s: &str) -> Result<u64, String> {
@@ -128,40 +124,113 @@ fn write_mode(file_path: &PathBuf, hex_string: &str, offset: u64) -> io::Result<
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let mut file_path: Option<PathBuf> = None;
+    let mut read_mode_enabled = false;
+    let mut write_hex: Option<String> = None;
+    let mut offset_str: Option<String> = None;
+    let mut size: Option<usize> = None;
 
-    let file_path = match cli.file {
+    let mut args = env::args().skip(1).peekable();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                return;
+            }
+            "-f" | "--file" => {
+                let val = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: Missing value for --file");
+                        std::process::exit(2);
+                    }
+                };
+                file_path = Some(PathBuf::from(val));
+            }
+            "-r" | "--read" => {
+                read_mode_enabled = true;
+            }
+            "-w" | "--write" => {
+                let val = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: Missing value for --write");
+                        std::process::exit(2);
+                    }
+                };
+                write_hex = Some(val);
+            }
+            "-o" | "--offset" => {
+                let val = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: Missing value for --offset");
+                        std::process::exit(2);
+                    }
+                };
+                offset_str = Some(val);
+            }
+            "-s" | "--size" => {
+                let val = match args.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("error: Missing value for --size");
+                        std::process::exit(2);
+                    }
+                };
+                size = match val.parse::<usize>() {
+                    Ok(n) if n > 0 => Some(n),
+                    _ => {
+                        eprintln!("error: --size expects a positive integer");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            s if s.starts_with('-') => {
+                eprintln!("error: Unknown option: {}", s);
+                eprintln!("error: Try '--help' for usage");
+                std::process::exit(2);
+            }
+            _ => {
+                eprintln!("error: Unexpected argument");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let file_path = match file_path {
         Some(path) => path,
         None => {
-            eprintln!("Error: --file is required");
+            eprintln!("error: --file is required");
             std::process::exit(1);
         }
     };
 
-    let offset = match cli.offset {
+    let offset = match offset_str {
         Some(ref s) => match parse_offset(s) {
             Ok(off) => off,
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("error: {}", e);
                 std::process::exit(1);
             }
         },
         None => 0,
     };
 
-    if cli.read {
-        let size = cli.size.unwrap_or(256);
+    if read_mode_enabled {
+        let size = size.unwrap_or(256);
         if let Err(e) = read_mode(&file_path, offset, size) {
-            eprintln!("Error reading file: {}", e);
+            eprintln!("error: reading file: {}", e);
             std::process::exit(1);
         }
-    } else if let Some(hex_string) = cli.write {
+    } else if let Some(hex_string) = write_hex {
         if let Err(e) = write_mode(&file_path, &hex_string, offset) {
-            eprintln!("Error writing file: {}", e);
+            eprintln!("error: writing file: {}", e);
             std::process::exit(1);
         }
     } else {
-        eprintln!("Error: Either --read or --write must be specified");
+        eprintln!("error: Either --read or --write must be specified");
         std::process::exit(1);
     }
 }

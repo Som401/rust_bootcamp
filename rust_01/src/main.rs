@@ -90,8 +90,8 @@ fn main() {
                 };
             }
             s if s.starts_with('-') => {
-                eprintln!("error: Unknown option: {}", s);
-                eprintln!("error: Try '--help' for usage");
+                println!("error: Unknown option: {}", s);
+                println!("error: Try '--help' for usage");
                 std::process::exit(2);
             }
             s => text_parts.push(s.to_string()),

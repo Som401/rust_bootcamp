@@ -1,234 +1,164 @@
-use rand::Rng;
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::env;
-use std::fs::File;
-use std::io::{self, Read, Write};
-use std::process;
+use std::fs;
+use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Point {
-    x: usize,
-    y: usize,
+struct SimplePrng {
+    state: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct State {
-    cost: u32,
-    position: Point,
-}
+impl SimplePrng {
+    fn new() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        SimplePrng { state: seed }
+    }
 
-impl Ord for State {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .cost
-            .cmp(&self.cost)
-            .then_with(|| self.position.x.cmp(&other.position.x))
-            .then_with(|| self.position.y.cmp(&other.position.y))
+    fn gen_range(&mut self, min: u8, max: u8) -> u8 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        let range = (max - min) as u64 + 1;
+        min + ((self.state % range) as u8)
     }
 }
 
-impl PartialOrd for State {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
+#[derive(Clone)]
 struct Grid {
+    cells: Vec<Vec<u8>>,
     width: usize,
     height: usize,
-    cells: Vec<u8>,
+}
+
+struct PathResult {
+    path: Vec<(usize, usize)>,
+    total_cost: u32,
 }
 
 impl Grid {
-    fn new(width: usize, height: usize) -> Self {
+    fn new(cells: Vec<Vec<u8>>) -> Self {
+        let height = cells.len();
+        let width = if height > 0 { cells[0].len() } else { 0 };
         Grid {
+            cells,
             width,
             height,
-            cells: vec![0; width * height],
         }
     }
 
-    fn get(&self, p: Point) -> u8 {
-        self.cells[p.y * self.width + p.x]
+    fn get(&self, x: usize, y: usize) -> u8 {
+        self.cells[y][x]
     }
 
-    fn set(&mut self, p: Point, val: u8) {
-        self.cells[p.y * self.width + p.x] = val;
-    }
-
-    fn neighbors(&self, p: Point) -> Vec<Point> {
-        let mut neighbors = Vec::new();
-        if p.x > 0 {
-            neighbors.push(Point { x: p.x - 1, y: p.y });
+    fn neighbors(&self, x: usize, y: usize) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+        if x > 0 {
+            result.push((x - 1, y));
         }
-        if p.x < self.width - 1 {
-            neighbors.push(Point { x: p.x + 1, y: p.y });
+        if x < self.width - 1 {
+            result.push((x + 1, y));
         }
-        if p.y > 0 {
-            neighbors.push(Point { x: p.x, y: p.y - 1 });
+        if y > 0 {
+            result.push((x, y - 1));
         }
-        if p.y < self.height - 1 {
-            neighbors.push(Point { x: p.x, y: p.y + 1 });
+        if y < self.height - 1 {
+            result.push((x, y + 1));
         }
-        neighbors
+        result
     }
 }
 
 fn generate_map(width: usize, height: usize) -> Grid {
-    let mut grid = Grid::new(width, height);
-    let mut rng = rand::thread_rng();
+    let mut rng = SimplePrng::new();
+    let mut cells = vec![vec![0u8; width]; height];
 
-    for y in 0..height {
-        for x in 0..width {
-            grid.set(Point { x, y }, rng.gen());
-        }
-    }
+    cells[0][0] = 0x00;
+    cells[height - 1][width - 1] = 0xFF;
 
-    grid.set(Point { x: 0, y: 0 }, 0x00);
-    grid.set(
-        Point {
-            x: width - 1,
-            y: height - 1,
-        },
-        0xFF,
-    );
-
-    grid
-}
-
-fn save_map(grid: &Grid, filename: &str) -> io::Result<()> {
-    let mut file = File::create(filename)?;
-    for y in 0..grid.height {
-        for x in 0..grid.width {
-            let val = grid.get(Point { x, y });
-            write!(file, "{:02X}", val)?;
-            if x < grid.width - 1 {
-                write!(file, " ")?;
+    for (y, row) in cells.iter_mut().enumerate() {
+        for (x, cell) in row.iter_mut().enumerate() {
+            if (x, y) == (0, 0) || (x, y) == (width - 1, height - 1) {
+                continue;
             }
+            *cell = rng.gen_range(0x01, 0xFE);
         }
-        writeln!(file)?;
     }
-    Ok(())
+
+    Grid::new(cells)
 }
 
-fn load_map(filename: &str) -> io::Result<Grid> {
-    let mut file = File::open(filename)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
+fn parse_map(path: &str) -> Result<Grid, String> {
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
 
     let mut cells = Vec::new();
-    let mut width = 0;
-    let mut height = 0;
-
-    for line in contents.lines() {
+    for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let row_vals: Vec<u8> = line
+
+        let row: Result<Vec<u8>, _> = line
             .split_whitespace()
-            .map(|s| u8::from_str_radix(s, 16).unwrap_or(0))
+            .map(|s| u8::from_str_radix(s, 16))
             .collect();
 
-        if width == 0 {
-            width = row_vals.len();
-        } else if row_vals.len() != width {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Inconsistent row width",
-            ));
-        }
-        cells.extend(row_vals);
-        height += 1;
+        cells.push(row.map_err(|e| format!("Invalid hex value: {}", e))?);
     }
 
-    Ok(Grid {
-        width,
-        height,
-        cells,
-    })
+    if cells.is_empty() {
+        return Err("Empty map".to_string());
+    }
+
+    let width = cells[0].len();
+    for row in &cells {
+        if row.len() != width {
+            return Err("Inconsistent row lengths".to_string());
+        }
+    }
+
+    Ok(Grid::new(cells))
 }
 
-fn dijkstra(
-    grid: &Grid,
-    start: Point,
-    end: Point,
-    find_max: bool,
-    animate: bool,
-) -> Option<(u32, Vec<Point>)> {
-    let mut dist: HashMap<Point, u32> = HashMap::new();
+fn save_map(grid: &Grid, path: &str) -> Result<(), String> {
+    let mut file = fs::File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
+
+    for row in &grid.cells {
+        let line: Vec<String> = row.iter().map(|&v| format!("{:02X}", v)).collect();
+        writeln!(file, "{}", line.join(" ")).map_err(|e| format!("Failed to write: {}", e))?;
+    }
+
+    Ok(())
+}
+
+fn dijkstra_min(grid: &Grid) -> Option<PathResult> {
     let mut heap = BinaryHeap::new();
-    let mut came_from: HashMap<Point, Point> = HashMap::new();
-    let mut visited_for_anim: HashSet<Point> = HashSet::new();
+    let mut dist = vec![vec![u32::MAX; grid.width]; grid.height];
+    let mut parent = vec![vec![None; grid.width]; grid.height];
 
-    dist.insert(start, 0);
-    heap.push(State {
-        cost: 0,
-        position: start,
-    });
+    heap.push(Reverse((0u32, 0usize, 0usize)));
+    dist[0][0] = 0;
 
-    let mut step_count = 0;
-
-    while let Some(State { cost, position }) = heap.pop() {
-        if animate && !visited_for_anim.contains(&position) {
-            step_count += 1;
-            visited_for_anim.insert(position);
-            print!("\\x1b[2J\\x1b[1;1H");
-            println!(
-                "Searching for {} cost path...",
-                if find_max { "maximum" } else { "minimum" }
-            );
-            println!(
-                "Step {}: Exploring ({},{}) - cost: {}",
-                step_count, position.x, position.y, cost
-            );
-            print_grid_anim(grid, &visited_for_anim, position);
-            thread::sleep(Duration::from_millis(20));
+    while let Some(Reverse((cost, x, y))) = heap.pop() {
+        if (x, y) == (grid.width - 1, grid.height - 1) {
+            return Some(reconstruct_path(grid, &parent, &dist, false));
         }
 
-        if position == end {
-            let mut path = Vec::new();
-            let mut current = end;
-            path.push(current);
-            while let Some(&prev) = came_from.get(&current) {
-                path.push(prev);
-                current = prev;
-            }
-            path.reverse();
-
-            let true_cost = if find_max {
-                path.iter().map(|p| grid.get(*p) as u32).sum::<u32>()
-            } else {
-                cost
-            };
-
-            return Some((true_cost, path));
-        }
-
-        if cost > *dist.get(&position).unwrap_or(&u32::MAX) {
+        if cost > dist[y][x] {
             continue;
         }
 
-        for neighbor in grid.neighbors(position) {
-            let val = grid.get(neighbor);
-            let weight = if find_max {
-                255 - val as u32
-            } else {
-                val as u32
-            };
-
-            let next_cost = cost + weight;
-
-            if next_cost < *dist.get(&neighbor).unwrap_or(&u32::MAX) {
-                heap.push(State {
-                    cost: next_cost,
-                    position: neighbor,
-                });
-                dist.insert(neighbor, next_cost);
-                came_from.insert(neighbor, position);
+        for (nx, ny) in grid.neighbors(x, y) {
+            let new_cost = cost + grid.get(nx, ny) as u32;
+            if new_cost < dist[ny][nx] {
+                dist[ny][nx] = new_cost;
+                parent[ny][nx] = Some((x, y));
+                heap.push(Reverse((new_cost, nx, ny)));
             }
         }
     }
@@ -236,107 +166,255 @@ fn dijkstra(
     None
 }
 
-fn print_grid_anim(grid: &Grid, visited: &HashSet<Point>, current: Point) {
-    for y in 0..grid.height {
-        for x in 0..grid.width {
-            let p = Point { x, y };
-            if p == current {
-                print!("[*]");
-            } else if visited.contains(&p) {
-                print!("[✓]");
-            } else {
-                print!("[ ]");
+fn dijkstra_max(grid: &Grid) -> Option<PathResult> {
+    let mut heap = BinaryHeap::new();
+    let mut dist = vec![vec![0u32; grid.width]; grid.height];
+    let mut parent = vec![vec![None; grid.width]; grid.height];
+    let mut visited = vec![vec![false; grid.width]; grid.height];
+
+    heap.push((0u32, 0usize, 0usize));
+    dist[0][0] = 0;
+
+    while let Some((cost, x, y)) = heap.pop() {
+        if visited[y][x] {
+            continue;
+        }
+        visited[y][x] = true;
+
+        if (x, y) == (grid.width - 1, grid.height - 1) {
+            return Some(reconstruct_path(grid, &parent, &dist, true));
+        }
+
+        for (nx, ny) in grid.neighbors(x, y) {
+            if !visited[ny][nx] {
+                let new_cost = cost + grid.get(nx, ny) as u32;
+                if new_cost > dist[ny][nx] {
+                    dist[ny][nx] = new_cost;
+                    parent[ny][nx] = Some((x, y));
+                    heap.push((new_cost, nx, ny));
+                }
             }
         }
-        println!();
     }
+
+    None
 }
 
-fn print_path_details(grid: &Grid, path: &[Point], total_cost: u32, title: &str) {
-    println!("\\n{}:", title);
-    println!("==================");
-    println!("Total cost: 0x{:X} ({} decimal)", total_cost, total_cost);
-    println!("Path length: {} steps", path.len());
+fn reconstruct_path(
+    grid: &Grid,
+    parent: &[Vec<Option<(usize, usize)>>],
+    dist: &[Vec<u32>],
+    _is_max: bool,
+) -> PathResult {
+    let mut path = Vec::new();
+    let mut current = (grid.width - 1, grid.height - 1);
 
-    print!("Path: ");
-    for (i, p) in path.iter().enumerate() {
-        print!("({},{})", p.x, p.y);
-        if i < path.len() - 1 {
-            print!("→");
+    while let Some((x, y)) = Some(current) {
+        path.push((x, y));
+
+        if (x, y) == (0, 0) {
+            break;
         }
-    }
-    println!();
 
-    println!("\\nStep-by-step costs:");
-    let mut current_cost = 0;
-    for (i, p) in path.iter().enumerate() {
-        let val = grid.get(*p);
-        if i == 0 {
-            println!("  Start  0x{:02X} ({},{})", val, p.x, p.y);
-            current_cost += val as u32;
+        if let Some(p) = parent[y][x] {
+            current = p;
         } else {
-            current_cost += val as u32;
-            println!("    →    0x{:02X} ({},{})  +{}", val, p.x, p.y, val);
+            break;
         }
     }
-    println!("  Total: 0x{:X} ({})", current_cost, current_cost);
+
+    path.reverse();
+
+    let total_cost = dist[grid.height - 1][grid.width - 1];
+
+    PathResult { path, total_cost }
 }
 
-fn visualize_grid(grid: &Grid, min_path: Option<&[Point]>, max_path: Option<&[Point]>) {
-    let min_set: HashSet<Point> = min_path.unwrap_or(&[]).iter().cloned().collect();
-    let max_set: HashSet<Point> = max_path.unwrap_or(&[]).iter().cloned().collect();
+fn get_color(value: u8) -> &'static str {
+    match value {
+        0x00..=0x1F => "\x1b[38;5;196m",
+        0x20..=0x3F => "\x1b[38;5;208m",
+        0x40..=0x5F => "\x1b[38;5;226m",
+        0x60..=0x7F => "\x1b[38;5;46m",
+        0x80..=0x9F => "\x1b[38;5;51m",
+        0xA0..=0xBF => "\x1b[38;5;21m",
+        0xC0..=0xDF => "\x1b[38;5;129m",
+        0xE0..=0xFF => "\x1b[38;5;201m",
+    }
+}
 
+fn visualize_grid(grid: &Grid, min_path: Option<&PathResult>, max_path: Option<&PathResult>) {
+    let min_set: HashSet<_> = min_path
+        .map(|p| p.path.iter().cloned().collect())
+        .unwrap_or_default();
+    let max_set: HashSet<_> = max_path
+        .map(|p| p.path.iter().cloned().collect())
+        .unwrap_or_default();
+
+    println!("\nHEXADECIMAL GRID (rainbow gradient):");
+    println!("═══════════════════════════════════════════════════════════════════════════════");
     for y in 0..grid.height {
         for x in 0..grid.width {
-            let p = Point { x, y };
-            let val = grid.get(p);
-
-            let (r, g, b) = if val < 128 {
-                (255, (val as u16 * 2) as u8, 0)
-            } else {
-                (255, 255, ((val as u16 - 128) * 2) as u8)
-            };
-
-            let bg_code = if min_set.contains(&p) && max_set.contains(&p) {
-                "\\x1b[48;2;255;0;255m"
-            } else if min_set.contains(&p) {
-                "\\x1b[48;2;255;255;255m\\x1b[30m"
-            } else if max_set.contains(&p) {
-                "\\x1b[48;2;255;0;0m\\x1b[37m"
-            } else {
-                ""
-            };
-
-            if min_set.contains(&p) || max_set.contains(&p) {
-                print!("{}{:02X}\\x1b[0m ", bg_code, val);
-            } else {
-                print!("\\x1b[38;2;{};{};{}m{:02X}\\x1b[0m ", r, g, b, val);
-            }
+            let value = grid.get(x, y);
+            let color = get_color(value);
+            print!("{}{:02X}\x1b[0m ", color, value);
         }
         println!();
+    }
+
+    if min_path.is_some() {
+        println!("\nMINIMUM COST PATH (shown in WHITE):");
+        println!("═══════════════════════════════════");
+        for y in 0..grid.height {
+            for x in 0..grid.width {
+                let value = grid.get(x, y);
+                if min_set.contains(&(x, y)) {
+                    print!("\x1b[47m\x1b[30m{:02X}\x1b[0m ", value);
+                } else {
+                    let color = get_color(value);
+                    print!("{}{:02X}\x1b[0m ", color, value);
+                }
+            }
+            println!();
+        }
+        if let Some(min) = min_path {
+            println!("\nCost: {} (minimum)", min.total_cost);
+        }
+    }
+
+    if max_path.is_some() {
+        println!("\nMAXIMUM COST PATH (shown in RED):");
+        println!("═════════════════════════════════");
+        for y in 0..grid.height {
+            for x in 0..grid.width {
+                let value = grid.get(x, y);
+                if max_set.contains(&(x, y)) {
+                    print!("\x1b[41m\x1b[37m{:02X}\x1b[0m ", value);
+                } else {
+                    let color = get_color(value);
+                    print!("{}{:02X}\x1b[0m ", color, value);
+                }
+            }
+            println!();
+        }
+        if let Some(max) = max_path {
+            println!("\nCost: {} (maximum)", max.total_cost);
+        }
+    }
+}
+
+fn print_path_analysis(grid: &Grid, result: &PathResult, label: &str) {
+    println!("\n{} COST PATH:", label);
+    println!("==================");
+    println!(
+        "Total cost: 0x{:X} ({} decimal)",
+        result.total_cost, result.total_cost
+    );
+    println!("Path length: {} steps", result.path.len());
+
+    let path_str: Vec<String> = result
+        .path
+        .iter()
+        .map(|(x, y)| format!("({},{})", x, y))
+        .collect();
+    println!("Path: {}", path_str.join("→"));
+
+    println!("\nStep-by-step costs:");
+    for (i, &(x, y)) in result.path.iter().enumerate() {
+        let value = grid.get(x, y);
+        if i == 0 {
+            println!("  Start  0x{:02X} ({},{})", value, x, y);
+        } else {
+            println!("    →    0x{:02X} ({},{})  +{}", value, x, y, value);
+        }
+    }
+    println!("  Total: 0x{:X} ({})", result.total_cost, result.total_cost);
+}
+
+fn animate_pathfinding(grid: &Grid) {
+    println!("Searching for minimum cost path...\n");
+
+    let mut heap = BinaryHeap::new();
+    let mut dist = vec![vec![u32::MAX; grid.width]; grid.height];
+    let mut visited = vec![vec![false; grid.width]; grid.height];
+
+    heap.push(Reverse((0u32, 0usize, 0usize)));
+    dist[0][0] = 0;
+
+    let mut step = 0;
+
+    while let Some(Reverse((cost, x, y))) = heap.pop() {
+        if visited[y][x] {
+            continue;
+        }
+        visited[y][x] = true;
+        step += 1;
+
+        println!("Step {}: Exploring ({},{}) - cost: {}", step, x, y, cost);
+
+        for (row_y, row) in visited.iter().enumerate() {
+            for (col_x, &is_visited) in row.iter().enumerate() {
+                if is_visited {
+                    print!("[✓]");
+                } else if (col_x, row_y) == (x, y) {
+                    print!("[*]");
+                } else {
+                    print!("[ ]");
+                }
+            }
+            println!();
+        }
+        println!();
+        thread::sleep(Duration::from_millis(200));
+
+        if (x, y) == (grid.width - 1, grid.height - 1) {
+            println!("✓ Reached destination!");
+            break;
+        }
+
+        for (nx, ny) in grid.neighbors(x, y) {
+            if !visited[ny][nx] {
+                let new_cost = cost + grid.get(nx, ny) as u32;
+                if new_cost < dist[ny][nx] {
+                    dist[ny][nx] = new_cost;
+                    heap.push(Reverse((new_cost, nx, ny)));
+                }
+            }
+        }
     }
 }
 
 fn print_help() {
-    println!("Usage: hexpath [OPTIONS] <map>");
-    println!("\\nFind min/max cost paths in hexadecimal grid");
-    println!("\\nArguments:");
-    println!("  <map>  Map file (hex values, space separated)");
-    println!("\\nOptions:");
-    println!("  --generate <widthxheight>  Generate random map (e.g., 8x4, 10x10)");
-    println!("  --output <file>            Save generated map to file");
-    println!("  --visualize                Show colored map");
-    println!("  --both                     Show both min and max paths");
-    println!("  --animate                  Animate pathfinding");
-    println!("  -h, --help");
+    println!("hexpath");
+    println!();
+    println!("Find min/max cost paths in hexadecimal grid");
+    println!();
+    println!("Map format:");
+    println!("  - Each cell: 00-FF (hexadecimal)");
+    println!("  - Start: top-left (must be 00)");
+    println!("  - End: bottom-right (must be FF)");
+    println!("  - Moves: up, down, left, right");
+    println!();
+    println!("Usage: hexpath [OPTIONS] [map]");
+    println!();
+    println!("Arguments:");
+    println!("  [map]  Map file (hex values, space separated)");
+    println!();
+    println!("Options:");
+    println!("      --generate <widthxheight>  Generate random map (e.g., 8x4, 10x10)");
+    println!("      --output <file>            Save generated map to file");
+    println!("      --visualize                Show colored map");
+    println!("      --both                     Show both min and max paths");
+    println!("      --animate                  Animate pathfinding");
+    println!("  -h, --help                     Print help");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mut generate_size: Option<(usize, usize)> = None;
-    let mut output_file: Option<String> = None;
-    let mut input_file: Option<String> = None;
+    let mut generate_spec: Option<String> = None;
+    let mut output_path: Option<String> = None;
+    let mut map_path: Option<String> = None;
     let mut visualize = false;
     let mut animate = false;
 
@@ -349,23 +427,20 @@ fn main() {
             }
             "--generate" => {
                 if i + 1 < args.len() {
-                    let parts: Vec<&str> = args[i + 1].split('x').collect();
-                    if parts.len() == 2 {
-                        if let (Ok(w), Ok(h)) = (parts[0].parse(), parts[1].parse()) {
-                            generate_size = Some((w, h));
-                        }
-                    }
+                    generate_spec = Some(args[i + 1].clone());
                     i += 2;
                 } else {
-                    i += 1;
+                    eprintln!("Error: --generate requires a value");
+                    std::process::exit(1);
                 }
             }
             "--output" => {
                 if i + 1 < args.len() {
-                    output_file = Some(args[i + 1].clone());
+                    output_path = Some(args[i + 1].clone());
                     i += 2;
                 } else {
-                    i += 1;
+                    eprintln!("Error: --output requires a value");
+                    std::process::exit(1);
                 }
             }
             "--visualize" => {
@@ -380,113 +455,91 @@ fn main() {
                 i += 1;
             }
             arg => {
-                if !arg.starts_with("-") {
-                    input_file = Some(arg.to_string());
+                if !arg.starts_with('-') {
+                    map_path = Some(arg.to_string());
                 }
                 i += 1;
             }
         }
     }
 
-    if let Some((w, h)) = generate_size {
-        println!("Generating {}x{} hexadecimal grid...", w, h);
-        let grid = generate_map(w, h);
-
-        if let Some(filename) = output_file {
-            if let Err(e) = save_map(&grid, &filename) {
-                eprintln!("Error saving map: {}", e);
-                process::exit(1);
-            }
-            println!("Map saved to: {}", filename);
+    if let Some(gen_spec) = &generate_spec {
+        let parts: Vec<&str> = gen_spec.split('x').collect();
+        if parts.len() != 2 {
+            eprintln!("Error: Invalid format. Use WIDTHxHEIGHT (e.g., 12x8)");
+            std::process::exit(1);
         }
 
-        println!("\\nGenerated map:");
-        for y in 0..grid.height {
-            for x in 0..grid.width {
-                print!("{:02X} ", grid.get(Point { x, y }));
+        let width: usize = parts[0].parse().unwrap_or_else(|_| {
+            eprintln!("Error: Invalid width");
+            std::process::exit(1);
+        });
+
+        let height: usize = parts[1].parse().unwrap_or_else(|_| {
+            eprintln!("Error: Invalid height");
+            std::process::exit(1);
+        });
+
+        println!("Generating {}x{} hexadecimal grid...", width, height);
+        let grid = generate_map(width, height);
+
+        if let Some(output) = &output_path {
+            if let Err(e) = save_map(&grid, output) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
             }
-            println!();
+            println!("Map saved to: {}", output);
         }
+
+        println!("\nGenerated map:");
+        for row in &grid.cells {
+            let line: Vec<String> = row.iter().map(|&v| format!("{:02X}", v)).collect();
+            println!("{}", line.join(" "));
+        }
+
         return;
     }
 
-    let filename = match input_file {
-        Some(f) => f,
-        None => {
-            if args.len() > 1 {
-                eprintln!("Error: No map file specified");
-                process::exit(1);
-            }
-            print_help();
-            return;
-        }
-    };
+    let map = map_path.as_ref().unwrap_or_else(|| {
+        eprintln!("Error: Map file required (or use --generate)");
+        std::process::exit(1);
+    });
 
-    let grid = match load_map(&filename) {
+    let grid = match parse_map(map) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("Error loading map: {}", e);
-            process::exit(1);
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
     };
 
     if animate {
-        println!("Searching for minimum cost path...");
-        dijkstra(
-            &grid,
-            Point { x: 0, y: 0 },
-            Point {
-                x: grid.width - 1,
-                y: grid.height - 1,
-            },
-            false,
-            true,
-        );
-        println!("Done.");
+        animate_pathfinding(&grid);
         return;
     }
+
+    let min_result = dijkstra_min(&grid);
+    let max_result = dijkstra_max(&grid);
 
     if visualize {
-        let start = Point { x: 0, y: 0 };
-        let end = Point {
-            x: grid.width - 1,
-            y: grid.height - 1,
-        };
-        let min_res = dijkstra(&grid, start, end, false, false);
-        visualize_grid(&grid, min_res.as_ref().map(|r| r.1.as_slice()), None);
-        return;
-    }
-
-    println!("Analyzing hexadecimal grid...");
-    println!("Grid size: {}×{}", grid.width, grid.height);
-    println!("Start: (0,0) = 0x{:02X}", grid.get(Point { x: 0, y: 0 }));
-    println!(
-        "End: ({},{}) = 0x{:02X}",
-        grid.width - 1,
-        grid.height - 1,
-        grid.get(Point {
-            x: grid.width - 1,
-            y: grid.height - 1
-        })
-    );
-
-    let start = Point { x: 0, y: 0 };
-    let end = Point {
-        x: grid.width - 1,
-        y: grid.height - 1,
-    };
-
-    let min_result = dijkstra(&grid, start, end, false, false);
-    if let Some((cost, ref path)) = min_result {
-        print_path_details(&grid, path, cost, "MINIMUM COST PATH");
+        visualize_grid(&grid, min_result.as_ref(), max_result.as_ref());
     } else {
-        println!("No minimum path found!");
-    }
+        println!("Analyzing hexadecimal grid...");
+        println!("Grid size: {}×{}", grid.width, grid.height);
+        println!("Start: (0,0) = 0x{:02X}", grid.get(0, 0));
+        println!(
+            "End: ({},{}) = 0x{:02X}",
+            grid.width - 1,
+            grid.height - 1,
+            grid.get(grid.width - 1, grid.height - 1)
+        );
 
-    let max_result = dijkstra(&grid, start, end, true, false);
-    if let Some((cost, ref path)) = max_result {
-        print_path_details(&grid, path, cost, "MAXIMUM COST PATH");
-    } else {
-        println!("No maximum path found!");
+        if let Some(ref min) = min_result {
+            print_path_analysis(&grid, min, "MINIMUM");
+        }
+
+        if let Some(ref max) = max_result {
+            print_path_analysis(&grid, max, "MAXIMUM");
+        }
     }
 }

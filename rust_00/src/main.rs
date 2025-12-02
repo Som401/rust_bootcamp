@@ -30,22 +30,22 @@ fn main() {
                 let val = match args.next() {
                     Some(v) => v,
                     None => {
-                        eprintln!("error: Missing value for --repeat");
-                        eprintln!("error: Try '--help' for usage");
+                        eprintln!("Missing value for --repeat");
+                        eprintln!("Try '--help' for usage");
                         std::process::exit(2);
                     }
                 };
                 repeat = match val.parse::<usize>() {
                     Ok(n) if n > 0 => n,
                     _ => {
-                        eprintln!("error: --repeat expects a positive integer");
+                        eprintln!("--repeat expects a positive integer");
                         std::process::exit(2);
                     }
                 };
             }
             s if s.starts_with('-') => {
-                eprintln!("error: Unknown option: {}", s);
-                eprintln!("error: Try '--help' for usage");
+                eprintln!("Unknown option: {}", s);
+                eprintln!("Try '--help' for usage");
                 std::process::exit(2);
             }
             s => name = s.to_string(),

@@ -1,57 +1,36 @@
+use clap::Parser;
+use rand::Rng;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-struct SimplePrng {
-    state: u64,
-}
-
-impl SimplePrng {
-    fn new() -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        SimplePrng { state: seed }
-    }
-
-    fn gen_range(&mut self, min: u8, max: u8) -> u8 {
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 7;
-        self.state ^= self.state << 17;
-        let range = (max - min + 1) as u64;
-        min + ((self.state % range) as u8)
-    }
-}
-
-fn print_help() {
-    println!(
-        "Usage: hexpath [MAP] [OPTIONS]\n\
-\n\
-Find min/max cost paths in hexadecimal grid\n\
-\n\
-Arguments:\n\
-  [MAP]                 Map file (hex values, space separated)\n\
-\n\
-Options:\n\
-  --generate <WxH>      Generate random map (e.g., 8x4, 10x10)\n\
-  --output <file>       Save generated map to file\n\
-  --visualize           Show colored map\n\
-  --both                Show both min and max paths\n\
-  --animate             Animate pathfinding\n\
-  -h, --help            Print help\n\
-\n\
-Map format:\n\
-  - Each cell: 00-FF (hexadecimal)\n\
-  - Start: top-left (must be 00)\n\
-  - End: bottom-right (must be FF)\n\
-  - Moves: up, down, left, right"
-    );
+#[derive(Parser)]
+#[command(name = "hexpath")]
+#[command(about = "Find min/max cost paths in hexadecimal grid")]
+#[command(
+    long_about = "Find min/max cost paths in hexadecimal grid\n\nMap format:\n  - Each cell: 00-FF (hexadecimal)\n  - Start: top-left (must be 00)\n  - End: bottom-right (must be FF)\n  - Moves: up, down, left, right"
+)]
+struct Cli {
+    #[arg(value_name = "map", help = "Map file (hex values, space separated)")]
+    map: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "widthxheight",
+        help = "Generate random map (e.g., 8x4, 10x10)"
+    )]
+    generate: Option<String>,
+    #[arg(long, value_name = "file", help = "Save generated map to file")]
+    output: Option<PathBuf>,
+    #[arg(long, help = "Show colored map")]
+    visualize: bool,
+    #[arg(long, help = "Show both min and max paths")]
+    both: bool,
+    #[arg(long, help = "Animate pathfinding")]
+    animate: bool,
 }
 
 #[derive(Clone)]
@@ -100,7 +79,7 @@ impl Grid {
 }
 
 fn generate_map(width: usize, height: usize) -> Grid {
-    let mut rng = SimplePrng::new();
+    let mut rng = rand::thread_rng();
     let mut cells = vec![vec![0u8; width]; height];
 
     cells[0][0] = 0x00;
@@ -111,7 +90,7 @@ fn generate_map(width: usize, height: usize) -> Grid {
             if (x, y) == (0, 0) || (x, y) == (width - 1, height - 1) {
                 continue;
             }
-            *cell = rng.gen_range(0x01, 0xFE);
+            *cell = rng.gen_range(0x01..=0xFE);
         }
     }
 
@@ -276,6 +255,7 @@ fn visualize_grid(grid: &Grid, min_path: Option<&PathResult>, max_path: Option<&
         .map(|p| p.path.iter().cloned().collect())
         .unwrap_or_default();
 
+    // Grid 1: Base rainbow colors
     println!("\nHEXADECIMAL GRID (rainbow gradient):");
     println!("═══════════════════════════════════════════════════════════════════════════════");
     for y in 0..grid.height {
@@ -287,6 +267,7 @@ fn visualize_grid(grid: &Grid, min_path: Option<&PathResult>, max_path: Option<&
         println!();
     }
 
+    // Grid 2: Minimum path highlighted
     if min_path.is_some() {
         println!("\nMINIMUM COST PATH (shown in WHITE):");
         println!("═══════════════════════════════════");
@@ -307,6 +288,7 @@ fn visualize_grid(grid: &Grid, min_path: Option<&PathResult>, max_path: Option<&
         }
     }
 
+    // Grid 3: Maximum path highlighted
     if max_path.is_some() {
         println!("\nMAXIMUM COST PATH (shown in RED):");
         println!("═════════════════════════════════");
@@ -410,85 +392,34 @@ fn animate_pathfinding(grid: &Grid) {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    let mut map_path: Option<PathBuf> = None;
-    let mut generate_spec: Option<String> = None;
-    let mut output_path: Option<PathBuf> = None;
-    let mut visualize = false;
-    let mut both = false;
-    let mut animate = false;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                print_help();
-                return;
-            }
-            "--generate" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: Missing value for --generate");
-                    std::process::exit(2);
-                }
-                generate_spec = Some(args[i].clone());
-            }
-            "--output" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: Missing value for --output");
-                    std::process::exit(2);
-                }
-                output_path = Some(PathBuf::from(&args[i]));
-            }
-            "--visualize" => {
-                visualize = true;
-            }
-            "--both" => {
-                both = true;
-            }
-            "--animate" => {
-                animate = true;
-            }
-            s if s.starts_with('-') => {
-                eprintln!("error: Unknown option: {}", s);
-                eprintln!("error: Try '--help' for usage");
-                std::process::exit(2);
-            }
-            _ => {
-                map_path = Some(PathBuf::from(&args[i]));
-            }
-        }
-        i += 1;
-    }
-
-    if let Some(gen_spec) = &generate_spec {
+    if let Some(gen_spec) = &cli.generate {
         let parts: Vec<&str> = gen_spec.split('x').collect();
         if parts.len() != 2 {
-            eprintln!("error: Invalid format. Use WIDTHxHEIGHT (e.g., 12x8)");
+            eprintln!("Error: Invalid format. Use WIDTHxHEIGHT (e.g., 12x8)");
             std::process::exit(1);
         }
 
         let width: usize = parts[0].parse().unwrap_or_else(|_| {
-            eprintln!("error: Invalid width");
+            eprintln!("Error: Invalid width");
             std::process::exit(1);
         });
 
         let height: usize = parts[1].parse().unwrap_or_else(|_| {
-            eprintln!("error: Invalid height");
+            eprintln!("Error: Invalid height");
             std::process::exit(1);
         });
 
         println!("Generating {}x{} hexadecimal grid...", width, height);
         let grid = generate_map(width, height);
 
-        if let Some(ref output) = output_path {
-            if let Err(e) = save_map(&grid, output) {
-                eprintln!("error: {}", e);
+        if let Some(output_path) = &cli.output {
+            if let Err(e) = save_map(&grid, output_path) {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            println!("Map saved to: {}", output.display());
+            println!("Map saved to: {}", output_path.display());
         }
 
         println!("\nGenerated map:");
@@ -500,30 +431,32 @@ fn main() {
         return;
     }
 
-    let map = map_path.as_ref().unwrap_or_else(|| {
-        eprintln!("error: Map file required (or use --generate)");
+    let map_path = cli.map.as_ref().unwrap_or_else(|| {
+        eprintln!("Error: Map file required (or use --generate)");
         std::process::exit(1);
     });
 
-    let grid = match parse_map(map) {
+    let grid = match parse_map(map_path) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("Error: {}", e);
             std::process::exit(1);
         }
     };
 
-    if animate {
+    if cli.animate {
         animate_pathfinding(&grid);
         return;
     }
 
     let min_result = dijkstra_min(&grid);
-    let max_result = if both { dijkstra_max(&grid) } else { None };
+    let max_result = dijkstra_max(&grid);
 
-    if visualize {
+    if cli.visualize {
+        // Only show visualization, no text
         visualize_grid(&grid, min_result.as_ref(), max_result.as_ref());
     } else {
+        // Show header and full text analysis
         println!("Analyzing hexadecimal grid...");
         println!("Grid size: {}×{}", grid.width, grid.height);
         println!("Start: (0,0) = 0x{:02X}", grid.get(0, 0));

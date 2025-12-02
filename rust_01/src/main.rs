@@ -90,8 +90,8 @@ fn main() {
                 };
             }
             s if s.starts_with('-') => {
-                eprintln!("error: Unknown option: {}", s);
-                eprintln!("error: Try '--help' for usage");
+                eprintln!("Unknown option: {}", s);
+                eprintln!("Try '--help' for usage");
                 std::process::exit(2);
             }
             s => text_parts.push(s.to_string()),
@@ -109,7 +109,6 @@ fn main() {
     } else {
         text_parts.join(" ")
     };
-    let from_stdin = text_parts.is_empty();
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for token in input.split(|c: char| !c.is_alphanumeric()) {
@@ -130,21 +129,14 @@ fn main() {
     let mut items: Vec<(String, usize)> = counts.into_iter().collect();
     items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    let to_show: Vec<_> = items.into_iter().take(top_n).collect();
-
-    if from_stdin {
-        // Single-line output for stdin: "foo: 2  bar: 1"
-        let parts: Vec<String> = to_show.iter().map(|(w, n)| format!("{}: {}", w, n)).collect();
-        println!("{}", parts.join("  "));
+    if top_n == 10 {
+        println!("Word frequency:");
     } else {
-        if top_n == 10 {
-            println!("Word frequency:");
-        } else {
-            println!("Top {} words:", top_n);
-        }
+        println!("Top {} words:", top_n);
+    }
 
-        for (w, n) in to_show {
-            println!("{}: {}", w, format_number(n));
-        }
+    let to_show = items.into_iter().take(top_n);
+    for (w, n) in to_show {
+        println!("{}: {}", w, format_number(n));
     }
 }

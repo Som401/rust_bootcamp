@@ -455,7 +455,10 @@ fn main() {
                 i += 1;
             }
             arg => {
-                if !arg.starts_with('-') {
+                if arg.starts_with('-') {
+                    eprintln!("error: Invalid option: {}", arg);
+                    std::process::exit(2);
+                } else {
                     map_path = Some(arg.to_string());
                 }
                 i += 1;

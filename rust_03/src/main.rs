@@ -47,8 +47,8 @@ fn mod_pow(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
 
 fn print_help() {
     println!("Usage: streamchat");
-    println!("\\nStream cipher chat with Diffie-Hellman key generation");
-    println!("\\nCommands:");
+    println!("\nStream cipher chat with Diffie-Hellman key generation");
+    println!("\nCommands:");
     println!("  server Start server");
     println!("  client Connect to server");
 }
@@ -75,7 +75,11 @@ fn main() {
             }
             run_client(&args[2]);
         }
-        _ => print_help(),
+        _ => {
+            eprintln!("error: Invalid command '{}'", args[1]);
+            print_help();
+            process::exit(2);
+        }
     }
 }
 
@@ -83,10 +87,13 @@ fn run_server(port: &str) {
     let address = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&address).expect("Failed to bind");
     println!("[SERVER] Listening on {}", address);
+    println!("[SERVER] DH parameters:");
+    println!("  p = {:016X}", P);
+    println!("  g = {}", G);
     println!("[SERVER] Waiting for client...");
 
     if let Ok((stream, addr)) = listener.accept() {
-        println!("\\n[CLIENT] Connected from {}", addr);
+        println!("\n[CLIENT] Connected from {}", addr);
         handle_connection(stream, true);
     }
 }

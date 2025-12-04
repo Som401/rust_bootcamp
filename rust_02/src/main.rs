@@ -93,7 +93,7 @@ fn main() {
                 }
             }
             _ => {
-                eprintln!("Error: Invalid option {}", args[i]);
+                eprintln!("error: Invalid option {}", args[i]);
                 process::exit(2);
             }
         }
@@ -102,7 +102,7 @@ fn main() {
     let path = match file_path {
         Some(p) => p,
         None => {
-            eprintln!("Error: No file specified");
+            eprintln!("error: No file specified");
             process::exit(1);
         }
     };

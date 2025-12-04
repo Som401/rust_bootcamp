@@ -113,14 +113,21 @@ fn main() {
     };
 
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for token in input.split(|c: char| !c.is_alphanumeric()) {
+    for token in input.split(|c: char| c.is_whitespace()) {
         if token.is_empty() {
             continue;
         }
+        // Remove only trailing punctuation, preserve quotes around words
+        let trimmed = token.trim_matches(|c: char| {
+            c != '\'' && c != '"' && !c.is_alphanumeric()
+        });
+        if trimmed.is_empty() {
+            continue;
+        }
         let word = if ignore_case {
-            token.to_lowercase()
+            trimmed.to_lowercase()
         } else {
-            token.to_string()
+            trimmed.to_string()
         };
         if word.chars().count() < min_len {
             continue;

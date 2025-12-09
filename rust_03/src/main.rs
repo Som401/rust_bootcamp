@@ -61,6 +61,10 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "-h" | "--help" => {
+            print_help();
+            return;
+        }
         "server" => {
             if args.len() < 3 {
                 eprintln!("Usage: cargo run -- server <PORT>");

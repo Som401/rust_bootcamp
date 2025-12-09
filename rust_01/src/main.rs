@@ -117,10 +117,7 @@ fn main() {
         if token.is_empty() {
             continue;
         }
-        // Remove only trailing punctuation, preserve quotes around words
-        let trimmed = token.trim_matches(|c: char| {
-            c != '\'' && c != '"' && !c.is_alphanumeric()
-        });
+        let trimmed = token.trim_matches(|c: char| c != '\'' && c != '"' && !c.is_alphanumeric());
         if trimmed.is_empty() {
             continue;
         }
@@ -141,14 +138,12 @@ fn main() {
     let to_show: Vec<_> = items.into_iter().take(top_n).collect();
 
     if from_stdin {
-        // Single-line output for stdin: "foo: 2  bar: 1"
         let parts: Vec<String> = to_show
             .iter()
             .map(|(w, n)| format!("{}: {}", w, n))
             .collect();
         println!("{}", parts.join("  "));
     } else {
-        // Multi-line output with header for positional args
         if top_n == 10 {
             println!("Word frequency:");
         } else {
